@@ -4,44 +4,98 @@ A React web application with an Express.js server that displays calendar events.
 
 ## Features
 
+### Core Features
 - **Google Calendar Integration**: Connect your Google account to fetch real calendar events
 - **Fallback to Sample Data**: Use built-in sample events if you prefer not to connect Google Calendar
 - **React Frontend**: Clean, responsive UI with modern design
 - **Express.js Backend**: RESTful API serving calendar data
 - **AI Event Analysis**: OpenAI-powered agent that analyzes events and suggests preparation tasks
 - **Smart Event Classification**: Automatically categorizes events (travel, meetings, concerts, etc.)
-- **Mock Data**: 10 different event types including:
-  - Travel events
-  - Concert events  
-  - Band practice sessions
-  - Pickup appointments
-- **Smart Suggestions**: Event-specific preparation recommendations with:
+
+### AI-Powered Analysis
+- **Agentic Event Analysis**: Modular AI agent with tool integration
+- **Context-Aware Checklists**: Event-specific preparation recommendations with:
   - Prioritized task lists
   - Time estimates for each task
   - Preparation timelines
   - Pro tips and advice
+- **Document Integration**: Automatically fetches and summarizes Google Docs linked in event descriptions
+- **Weather Integration**: Outdoor event suggestions based on weather forecasts
+
+### Meal Planning (NEW ⭐)
+- **Automatic Detection**: Recognizes meal prep events (keywords: meal, lunch, dinner + prep)
+- **MCP Integration**: Uses official Spoonacular MCP server for standardized API access
+- **User Preferences**: Customizable meal plans with:
+  - Number of days (1-7)
+  - Number of people
+  - Dietary restrictions (vegetarian, vegan, keto, paleo, etc.)
+  - Target calories
+  - Food exclusions
+- **Dual-Source Generation**:
+  - **Primary**: Spoonacular API via official MCP server (recipes, ingredients, nutrition)
+  - **Fallback**: AI-generated meal plans when Spoonacular unavailable
+- **Rich Display**: Inline meal cards with images, nutrition info, and recipe links
+- **Smart Integration**: Meal plans integrated into event preparation checklists
+
+### Task Management
+- **Task Scheduling**: Add AI-generated tasks directly to Google Calendar
+- **Task Tracking**: Server-side cache tracks remaining unscheduled tasks
+- **Metadata Sync**: Tasks linked to original events via Google Calendar extended properties
+- **Smart Hydration**: Shows remaining tasks when re-opening analyzed events
+
+### Voice Assistant
+- **Voice Commands**: Create, delete, and manage events via voice
+- **Whisper Integration**: OpenAI Whisper for accurate speech-to-text
+- **Follow-up Questions**: Interactive conversation flow for event details
+- **Wishlist Management**: Add items to wishlist via voice
+
+### Wishlist & Scheduling
+- **Wishlist Items**: Track activities you want to schedule
+- **Smart Matching**: AI matches wishlist items to free calendar slots
+- **Time Suggestions**: Finds optimal 2+ hour gaps in your schedule
+- **One-Click Scheduling**: Add matched items directly to calendar
+
+### Additional Features
 - **Responsive Design**: Mobile-friendly layout
 - **Error Handling**: Graceful error handling for server connectivity
 - **Loading States**: Visual feedback during data fetching
 - **Easy Authentication**: Simple Google OAuth integration with option to skip
+- **Uber Integration**: Mock Uber booking for transportation tasks
 
 ## Project Structure
 
 ```
-app1/
+CalendarAIAgent/
 ├── client/                 # React frontend
 │   ├── public/
 │   ├── src/
 │   │   ├── components/
-│   │   │   └── CalendarEvents.js
+│   │   │   ├── CalendarEvents.js    # Main calendar view
+│   │   │   ├── EventAnalysis.js     # AI analysis panel
+│   │   │   ├── VoiceAssistant.js    # Voice commands
+│   │   │   ├── Wishlist.js          # Wishlist management
+│   │   │   └── GoogleAuth.js        # OAuth flow
 │   │   ├── App.js
 │   │   ├── App.css
 │   │   ├── index.js
 │   │   └── index.css
 │   └── package.json
 ├── server/                 # Express.js backend
-│   └── server.js
+│   ├── server.js           # Main server & routes
+│   ├── eventAnalyzer.js    # AI event analysis orchestrator
+│   ├── routes/
+│   │   ├── voice.js        # Voice endpoints
+│   │   ├── googleCalendar.js  # Google Calendar API
+│   │   └── wishlist.js     # Wishlist endpoints
+│   └── services/
+│       ├── eventAgent.js   # Agentic analysis with meal planning
+│       ├── mcpMealPlanningClient.js  # Spoonacular MCP client
+│       ├── eventsStore.js  # Event storage
+│       ├── wishlistStore.js  # Wishlist storage
+│       ├── taskCache.js    # Task tracking
+│       └── voice/          # Voice adapters
 ├── package.json           # Root package.json
+├── ARCHITECTURE.md        # System architecture documentation
 └── README.md
 ```
 
@@ -52,6 +106,7 @@ app1/
 - Node.js (version 14 or higher)
 - npm
 - OpenAI API key (for AI event analysis feature)
+- Spoonacular API key (optional, for meal planning - falls back to AI if not available)
 
 ### Installation
 
@@ -65,16 +120,24 @@ app1/
    npm run install-all
    ```
 
-2. **Set up OpenAI API Key:**
+2. **Set up Environment Variables:**
    - Copy `.env.example` to `.env`:
      ```bash
      cp .env.example .env
      ```
    - Get your OpenAI API key from [OpenAI Platform](https://platform.openai.com/api-keys)
-   - Edit `.env` file and add your API key:
+   - (Optional) Get Spoonacular API key from [Spoonacular](https://spoonacular.com/food-api)
+   - Edit `.env` file and add your keys:
      ```
      OPENAI_API_KEY=your_actual_api_key_here
+     SPOONACULAR_API_KEY=your_spoonacular_key_here  # Optional
      ```
+
+3. **Install Spoonacular MCP Server (Optional - for Meal Planning):**
+   ```bash
+   npm install -g spoonacular-mcp
+   ```
+   This installs the official Spoonacular MCP server globally, enabling meal planning features.
 
 ### Running the Application
 
@@ -86,7 +149,7 @@ npm run dev
 ```
 
 This will start:
-- Express server on `http://localhost:5000`
+- Express server on `http://localhost:5001`
 - React client on `http://localhost:3000`
 
 #### Individual Components
@@ -108,64 +171,40 @@ npm start
 
 ## API Endpoints
 
-### GET /api/calendar/events
-Returns mock calendar events data.
+### Calendar & Events
+- `GET /api/calendar/events` - Get all calendar events (Google or mock)
+- `POST /api/analyze-event` - Analyze event and generate checklist
+- `POST /api/add-ai-tasks` - Add AI-generated tasks to calendar
+- `DELETE /api/calendar/events/:eventId` - Delete event
+- `GET /api/event-status/:eventId` - Get analysis metadata for event
 
-**Response:**
-```json
-{
-  "success": true,
-  "events": [
-    {
-      "id": "1",
-      "title": "Business Trip to New York",
-      "type": "travel",
-      "date": "2025-10-05T09:00:00Z",
-      "endDate": "2025-10-08T18:00:00Z",
-      "description": "Client meetings and conference attendance",
-      "location": "New York, NY"
-    }
-  ],
-  "message": "Calendar events retrieved successfully"
-}
-```
+### Meal Planning
+- `POST /api/generate-meal-plan` - Generate meal plan with user preferences
+  - Uses official Spoonacular MCP server
+  - Falls back to AI-generated meal plan if unavailable
+  - Returns structured meal plan with recipes, images, and nutrition data
 
-### POST /api/analyze-event
-Analyzes a specific calendar event using AI and returns preparation suggestions.
+### Voice Assistant
+- `POST /api/voice/transcribe` - Convert audio to text (Whisper)
+- `POST /api/voice/process` - Parse voice command and extract intent
+- `POST /api/voice/create-event` - Create event from voice
+- `POST /api/voice/add-to-wishlist` - Add wishlist item via voice
 
-**Request Body:**
-```json
-{
-  "eventId": "1"
-}
-```
+### Wishlist
+- `GET /api/wishlist/items` - Get all wishlist items
+- `POST /api/wishlist/items` - Add wishlist item
+- `DELETE /api/wishlist/items/:id` - Delete wishlist item
+- `POST /api/wishlist/find-time` - Find free slots and match items
 
-**Response:**
-```json
-{
-  "success": true,
-  "event": { /* event object */ },
-  "analysis": {
-    "eventSummary": "Travel preparation for...",
-    "preparationTasks": [
-      {
-        "task": "Check passport/ID validity",
-        "priority": "High",
-        "category": "Documentation",
-        "estimatedTime": "5 minutes"
-      }
-    ],
-    "timeline": {
-      "1 week before": ["Book transportation", "Check documentation"]
-    },
-    "tips": ["Check weather forecast for destination"],
-    "estimatedPrepTime": "4-6 hours"
-  }
-}
-```
+### Google Calendar
+- `GET /api/google-calendar/auth` - Initiate OAuth flow
+- `GET /api/google-calendar/callback` - OAuth callback
+- `POST /api/google-calendar/events` - Fetch Google Calendar events
+- `POST /api/google-calendar/disconnect` - Disconnect Google account
 
-### GET /api/health
-Health check endpoint to verify server status.
+### Utility
+- `GET /api/health` - Health check endpoint
+- `GET /api/debug/event/:eventId` - Debug event metadata (development)
 
 ## Mock Data
 
@@ -178,9 +217,23 @@ The application includes 10 pre-configured events:
 
 ## Technologies Used
 
-- **Frontend**: React 18, Axios, CSS3
-- **Backend**: Express.js, CORS
-- **Development**: Concurrently, Nodemon
+### Frontend
+- **React 18**: Modern UI with hooks and functional components
+- **Axios**: HTTP client for API calls
+- **Web Speech API**: Browser-native speech recognition and synthesis
+- **CSS3**: Custom responsive styling
+
+### Backend
+- **Node.js + Express.js**: RESTful API server
+- **OpenAI API**: GPT-3.5-turbo for analysis, Whisper for transcription
+- **Google Calendar API**: OAuth2 authentication and event sync
+- **Google Docs API**: Document fetching and summarization
+- **Spoonacular API**: Meal planning and nutrition data
+- **Spoonacular MCP Server**: Official MCP integration for standardized API access
+
+### Development
+- **Concurrently**: Run multiple processes
+- **Nodemon**: Auto-restart on file changes
 
 ## OpenAI Integration
 
@@ -206,14 +259,45 @@ For Google Calendar integration, see [GOOGLE_CALENDAR_SETUP.md](GOOGLE_CALENDAR_
 3. Install dependencies: `npm install` (in client directory)
 4. Run the app: `npm start`
 
+## Key Features in Detail
+
+### Meal Planning System
+The meal planning feature uses the Model Context Protocol (MCP) for standardized integration:
+
+1. **Spoonacular MCP Server (Primary)**:
+   - Official MCP-compliant server (`spoonacular-mcp` npm package)
+   - Professional recipes with detailed instructions
+   - Accurate nutritional information
+   - Dietary restriction support
+   - Standardized JSON-RPC 2.0 communication
+   - Ingredient lists and shopping guidance
+
+2. **AI Fallback (Secondary)**:
+   - Activates when Spoonacular is unavailable
+   - Uses user preferences to generate meal plans
+   - Provides similar structure to Spoonacular output
+   - Ensures feature always works
+
+### Metadata Tracking
+Events and tasks are tracked using Google Calendar's extended properties:
+- `isAnalyzed`: Marks events that have been analyzed
+- `analyzedAt`: Timestamp of analysis
+- `tasksCount`: Number of linked preparation tasks
+- `isAIGenerated`: Identifies AI-generated tasks
+- `originalEventId`: Links tasks back to source event
+
 ## Future Enhancements
 
-- Event creation and editing functionality
-- Event filtering and search
-- Calendar view (monthly/weekly)
-- Custom AI prompts for different event types
-- Multiple calendar support
-- Event synchronization
+- [ ] Persistent database (replace in-memory stores)
+- [ ] User accounts and multi-user support
+- [ ] Real Uber API integration
+- [ ] Calendar sharing and collaboration
+- [ ] Mobile app (React Native)
+- [ ] Push notifications for task reminders
+- [ ] Recurring event handling improvements
+- [ ] Custom AI prompts for different event types
+- [ ] Multiple calendar support
+- [ ] Meal plan export to grocery apps
 
 ## Contributing
 

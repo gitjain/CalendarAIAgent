@@ -51,7 +51,7 @@ Examples:
 - "Read book at coffee shop" → ~1-2 hours (flexible)`;
 
       const completion = await this.openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
+        model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
@@ -150,7 +150,7 @@ Return JSON array of matches (max 3 best matches):
 Only include matches where item duration fits in slot duration. Prioritize higher priority items and better time matches.`;
 
       const completion = await this.openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
+        model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
@@ -248,7 +248,7 @@ ${match.reasoning ? `Reasoning: ${match.reasoning}` : ''}
 Generate a brief, friendly message (1-2 sentences max) suggesting this activity for this time slot. Be conversational and encouraging.`;
 
       const completion = await this.openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
+        model: "gpt-4o-mini",
         messages: [
           {
             role: "system",

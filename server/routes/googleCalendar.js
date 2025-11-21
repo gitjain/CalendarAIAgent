@@ -110,24 +110,32 @@ router.post('/events', async (req, res) => {
     
     const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
     
-    // Set time window to one month from now (only fetch future events)
-    const now = new Date();
-    // Ensure we're getting events from today onwards, not past
-    now.setHours(0, 0, 0, 0); // Start from beginning of today
-    const oneMonthLater = new Date(now);
-    oneMonthLater.setMonth(oneMonthLater.getMonth() + 1);
-    
-    const response = await calendar.events.list({
-      calendarId: 'primary',
-      timeMin: now.toISOString(), // Only fetch events from today onwards
-      timeMax: oneMonthLater.toISOString(),
-      maxResults: 250,
-      singleEvents: true,
-      orderBy: 'startTime'
-    });
-    
+    // Fetch all future events starting today (with pagination)
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0); // Begin at midnight local time
+
+    let allEvents = [];
+    let nextPageToken = null;
+
+    do {
+      const response = await calendar.events.list({
+        calendarId: 'primary',
+        timeMin: startOfToday.toISOString(),
+        maxResults: 250,
+        singleEvents: true,
+        orderBy: 'startTime',
+        pageToken: nextPageToken || undefined
+      });
+
+      const items = response.data.items || [];
+      allEvents = allEvents.concat(items);
+      nextPageToken = response.data.nextPageToken;
+    } while (nextPageToken);
+
+    console.log(`📆 Retrieved ${allEvents.length} Google Calendar events starting ${startOfToday.toISOString().split('T')[0]}`);
+
     // Process events - keep all instances of recurring events
-    const events = (response.data.items || [])
+    const events = allEvents
       .filter(event => {
         // Keep non-recurring events
         if (!event.recurrence && !event.recurringEventId) {
@@ -157,8 +165,7 @@ router.post('/events', async (req, res) => {
         let title = event.summary || 'Untitled Event';
         
         // If title starts with 📋 but is just the emoji or placeholder, extract from description
-        if ((event.extendedProperties?.private?.isChecklistEvent === 'true' || 
-             event.extendedProperties?.private?.isGeneratedEvent === 'true') &&
+        if (event.extendedProperties?.private?.isAIGenerated === 'true' &&
             (title === '📋' || title === '📋 ' || title.includes('Prep:') || title.includes('Prep for'))) {
           // Try to extract task title from description
           const descMatch = event.description?.match(/^📋\s*(.+?)(?:\n|$)/);
@@ -206,10 +213,6 @@ router.post('/events', async (req, res) => {
         // Check if this event has been analyzed
         const isAnalyzed = event.extendedProperties?.private?.isAnalyzed === 'true';
 
-        // Check if this is a checklist/generated event
-        const isChecklistEvent = event.extendedProperties?.private?.isChecklistEvent === 'true';
-        const isGeneratedEvent = event.extendedProperties?.private?.isGeneratedEvent === 'true';
-
         // Debug logging for AI-generated events
         if (isAIGenerated) {
           console.log(`🤖 Found AI-generated event: ${title} (Extended props: ${JSON.stringify(event.extendedProperties)})`);
@@ -218,6 +221,19 @@ router.post('/events', async (req, res) => {
         // Debug logging for analyzed events
         if (isAnalyzed) {
           console.log(`✓ Found analyzed event: ${title}`);
+        }
+
+        // Get linkedTaskCount from extendedProperties
+        const linkedTaskCount = event.extendedProperties?.private?.tasksCount 
+          ? parseInt(event.extendedProperties.private.tasksCount, 10) 
+          : 0;
+
+        if (isAnalyzed || linkedTaskCount > 0) {
+          console.log(`📊 [Google Calendar Event] ${title}:`, {
+            isAnalyzed,
+            linkedTaskCount,
+            extendedProps: event.extendedProperties?.private
+          });
         }
 
         return {
@@ -230,8 +246,7 @@ router.post('/events', async (req, res) => {
           location: event.location || '',
           isAnalyzed: isAnalyzed,
           isAIGenerated: isAIGenerated,
-          isChecklistEvent: isChecklistEvent,
-          isGeneratedEvent: isGeneratedEvent,
+          linkedTaskCount: linkedTaskCount,
           originalEventId: event.extendedProperties?.private?.originalEventId,
           originalEventTitle: event.extendedProperties?.private?.originalEventTitle,
           source: 'google',
@@ -240,8 +255,7 @@ router.post('/events', async (req, res) => {
           allDay: !event.start?.dateTime, // true if only date is provided
           isRecurring: !!(event.recurrence || event.recurringEventId)
         };
-      })
-      .slice(0, 50); // Limit to 50 events
+      });
     
     res.json({
       success: true,

@@ -1,291 +1,365 @@
-const axios = require('axios');
-const { google } = require('googleapis');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 
 /**
  * MCP Meal Planning Client
- * Can work with a Python MCP server or call Spoonacular API directly
- * When used as an MCP tool, it formats the meal plan and creates a Google Doc
+ * Communicates with the official spoonacular-mcp server via JSON-RPC 2.0
+ * Generates structured meal plans with recipes, nutrition data, and images
  */
 class MCPMealPlanningClient extends EventEmitter {
   constructor() {
     super();
-    this.spoonacularApiKey = process.env.SPOONACULAR_API_KEY;
-    this.baseUrl = 'https://api.spoonacular.com';
-    this.mcpServerPath = process.env.MCP_MEAL_PLANNING_SERVER_PATH || null;
+    this.spoonacularApiKey = process.env.SPOONACULAR_API_KEY || process.env.SPOONACULAR_KEY;
+    this.mcpServerCommand = 'spoonacular-mcp';
+    this.requestId = 0;
   }
 
-  // Note: Event detection is now handled by the agent (LLM) based on context.
-  // The agent analyzes the event and decides when to use the meal planning MCP tool.
-  // No hardcoded pattern matching is needed - the agent has access to the meal planning
-  // tool and will call it when appropriate based on the event title and context.
-
   /**
-   * Call Spoonacular API directly (fallback if MCP server not available)
+   * Send a JSON-RPC 2.0 request to the MCP server
    */
-  async callSpoonacularAPI(endpoint, params = {}) {
-    if (!this.spoonacularApiKey) {
-      throw new Error('SPOONACULAR_API_KEY environment variable not set');
-    }
-
-    params.apiKey = this.spoonacularApiKey;
-    const url = `${this.baseUrl}${endpoint}`;
-
-    try {
-      const response = await axios.get(url, { params, timeout: 30000 });
-      return response.data;
-    } catch (error) {
-      console.error('Spoonacular API error:', error);
-      if (error.response) {
-        throw new Error(`Spoonacular API error: ${error.response.data.message || error.response.statusText}`);
+  async sendMCPRequest(method, params = {}) {
+    return new Promise((resolve, reject) => {
+      if (!this.spoonacularApiKey) {
+        return reject(new Error('SPOONACULAR_API_KEY or SPOONACULAR_KEY environment variable not set'));
       }
-      throw new Error(`Failed to call Spoonacular API: ${error.message}`);
-    }
+
+      this.requestId++;
+      const request = {
+        jsonrpc: '2.0',
+        id: this.requestId,
+        method: method,
+        params: params
+      };
+
+      console.log(`🍽️ [MCP] Sending request: ${method}`);
+
+      const child = spawn(this.mcpServerCommand, [], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          SPOONACULAR_API_KEY: this.spoonacularApiKey
+        }
+      });
+
+      let stdout = '';
+      let stderr = '';
+      let responseParsed = false;
+
+      child.stdin.write(JSON.stringify(request) + '\n');
+      child.stdin.end();
+
+      child.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      child.stderr.on('data', (data) => {
+        const stderrData = data.toString();
+        stderr += stderrData;
+        // Filter out the "running on stdio" message
+        if (!stderrData.includes('running on stdio')) {
+          console.error('[MCP stderr]:', stderrData);
+        }
+      });
+
+      child.on('error', (error) => {
+        console.error('❌ [MCP] Process error:', error.message);
+        if (error.code === 'ENOENT') {
+          reject(new Error('spoonacular-mcp not found. Please install it: npm install -g spoonacular-mcp'));
+        } else {
+          reject(new Error(`MCP server error: ${error.message}`));
+        }
+      });
+
+      child.on('close', (code) => {
+        if (responseParsed) return;
+
+        if (code !== 0) {
+          console.error('❌ [MCP] Server exited with code:', code);
+          if (stderr.includes('SPOONACULAR_API_KEY')) {
+            return reject(new Error('Spoonacular API key is missing or invalid'));
+          } else if (stderr.includes('rate limit') || stderr.includes('429')) {
+            return reject(new Error('Spoonacular API rate limit exceeded'));
+          } else if (stderr) {
+            return reject(new Error(`MCP server error: ${stderr.substring(0, 200)}`));
+          }
+          return reject(new Error(`MCP server exited with code ${code}`));
+        }
+
+        try {
+          // Parse the JSON-RPC response (may have multiple lines, we want the last JSON)
+          const lines = stdout.trim().split('\n');
+          let response = null;
+          
+          // Find the JSON-RPC response (skip server startup messages)
+          for (let i = lines.length - 1; i >= 0; i--) {
+            try {
+              const parsed = JSON.parse(lines[i]);
+              if (parsed.jsonrpc === '2.0' && parsed.id === this.requestId) {
+                response = parsed;
+                break;
+              }
+            } catch (e) {
+              // Not JSON, skip
+            }
+          }
+
+          if (!response) {
+            return reject(new Error('No valid JSON-RPC response received'));
+          }
+
+          responseParsed = true;
+
+          if (response.error) {
+            console.error('❌ [MCP] Server returned error:', response.error);
+            return reject(new Error(response.error.message || 'MCP server error'));
+          }
+
+          if (!response.result) {
+            return reject(new Error('MCP server returned no result'));
+          }
+
+          console.log('✅ [MCP] Request successful');
+          resolve(response.result);
+        } catch (parseError) {
+          console.error('❌ [MCP] Failed to parse response:', parseError.message);
+          console.error('Raw output:', stdout);
+          reject(new Error(`Failed to parse MCP response: ${parseError.message}`));
+        }
+      });
+    });
   }
 
   /**
-   * Generate meal plan using Spoonacular API
+   * Search for recipes using MCP server
    */
-  async generateMealPlan({ days = 7, targetCalories = 2000, diet = '', exclude = '' }) {
+  async searchRecipes({ query, number = 10, diet = '', intolerances = '', type = '', cuisine = '' }) {
     const params = {
-      timeFrame: days === 7 ? 'week' : 'day',
-      targetCalories: targetCalories
+      name: 'search_recipes',
+      arguments: {
+        query: query,
+        number: number
+      }
     };
 
-    if (diet) {
-      params.diet = diet;
-    }
-    if (exclude) {
-      params.exclude = exclude;
-    }
+    if (diet) params.arguments.diet = diet;
+    if (intolerances) params.arguments.intolerances = intolerances;
+    if (type) params.arguments.type = type;
+    if (cuisine) params.arguments.cuisine = cuisine;
 
-    return await this.callSpoonacularAPI('/mealplanner/generate', params);
+    const result = await this.sendMCPRequest('tools/call', params);
+    return result.content && result.content[0] ? JSON.parse(result.content[0].text) : null;
   }
 
   /**
-   * Format meal plan data into structured text for Google Doc
+   * Get detailed recipe information
    */
-  formatMealPlanForDoc(mealPlanData, preferences) {
-    let docContent = '';
-    
-    // Header
-    const eventDate = preferences.eventDate ? new Date(preferences.eventDate).toLocaleDateString('en-US', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    }) : new Date().toLocaleDateString();
-    
-    docContent += `WEEKLY MEAL PLAN\n`;
-    docContent += `Generated: ${eventDate}\n\n`;
-    
-    if (preferences.familySize) {
-      docContent += `Family Size: ${preferences.familySize}\n`;
+  async getRecipeInformation(recipeId, includeNutrition = true) {
+    const result = await this.sendMCPRequest('tools/call', {
+      name: 'get_recipe_information',
+      arguments: {
+        id: recipeId,
+        includeNutrition: includeNutrition
+      }
+    });
+    return result.content && result.content[0] ? JSON.parse(result.content[0].text) : null;
+  }
+
+  /**
+   * Get random recipes
+   */
+  async getRandomRecipes({ number = 7, tags = '' }) {
+    const result = await this.sendMCPRequest('tools/call', {
+      name: 'get_random_recipes',
+      arguments: {
+        number: number,
+        tags: tags
+      }
+    });
+    return result.content && result.content[0] ? JSON.parse(result.content[0].text) : null;
+  }
+
+  /**
+   * Build a meal plan from recipes
+   */
+  buildMealPlan(recipes, preferences) {
+    const meals = recipes.map((recipe, index) => ({
+      id: recipe.id,
+      title: recipe.title,
+      readyInMinutes: recipe.readyInMinutes,
+      servings: recipe.servings,
+      sourceUrl: recipe.sourceUrl || recipe.spoonacularSourceUrl,
+      image: recipe.image,
+      day: Math.floor(index / 3) + 1, // 3 meals per day
+      mealType: ['breakfast', 'lunch', 'dinner'][index % 3],
+      summary: recipe.summary ? recipe.summary.replace(/<[^>]*>/g, '').substring(0, 200) : ''
+    }));
+
+    // Calculate total nutrients if available
+    let totalNutrients = null;
+    if (recipes.some(r => r.nutrition)) {
+      totalNutrients = {
+        calories: 0,
+        protein: 0,
+        fat: 0,
+        carbohydrates: 0
+      };
+
+      recipes.forEach(recipe => {
+        if (recipe.nutrition && recipe.nutrition.nutrients) {
+          const nutrients = recipe.nutrition.nutrients;
+          const calories = nutrients.find(n => n.name === 'Calories');
+          const protein = nutrients.find(n => n.name === 'Protein');
+          const fat = nutrients.find(n => n.name === 'Fat');
+          const carbs = nutrients.find(n => n.name === 'Carbohydrates');
+
+          if (calories) totalNutrients.calories += calories.amount;
+          if (protein) totalNutrients.protein += protein.amount;
+          if (fat) totalNutrients.fat += fat.amount;
+          if (carbs) totalNutrients.carbohydrates += carbs.amount;
+        }
+      });
     }
+
+    return {
+      meals: meals,
+      nutrients: totalNutrients
+    };
+  }
+
+  /**
+   * Format meal plan as plain text
+   */
+  formatMealPlanText(mealPlan, preferences) {
+    let text = '🍽️ WEEKLY MEAL PLAN\n\n';
+    
     if (preferences.diet) {
-      docContent += `Dietary Preference: ${preferences.diet}\n`;
+      text += `Diet: ${preferences.diet}\n`;
+    }
+    if (preferences.targetCalories) {
+      text += `Target Calories: ${preferences.targetCalories}/day\n`;
     }
     if (preferences.exclude) {
-      docContent += `Exclusions: ${preferences.exclude}\n`;
+      text += `Exclusions: ${preferences.exclude}\n`;
     }
-    docContent += `Daily Calorie Target: ${preferences.targetCalories || 2000}\n`;
-    docContent += `\n${'='.repeat(50)}\n\n`;
+    text += '\n';
 
-    // Process meals
-    if (mealPlanData.meals) {
-      // Group meals by day
-      const mealsByDay = {};
-      mealPlanData.meals.forEach(meal => {
-        const day = meal.day || 'Unknown';
-        if (!mealsByDay[day]) {
-          mealsByDay[day] = [];
-        }
-        mealsByDay[day].push(meal);
-      });
+    // Group meals by day
+    const mealsByDay = {};
+    mealPlan.meals.forEach(meal => {
+      if (!mealsByDay[meal.day]) {
+        mealsByDay[meal.day] = [];
+      }
+      mealsByDay[meal.day].push(meal);
+    });
 
-      // Format each day
-      Object.keys(mealsByDay).sort().forEach(day => {
-        docContent += `DAY ${day}\n`;
-        docContent += `${'-'.repeat(30)}\n\n`;
-        
-        mealsByDay[day].forEach(meal => {
-          docContent += `🍽️ ${meal.title}\n`;
-          docContent += `   Ready in: ${meal.readyInMinutes || 'N/A'} minutes\n`;
-          docContent += `   Servings: ${meal.servings || 'N/A'}\n`;
-          if (meal.id) {
-            docContent += `   Recipe ID: ${meal.id}\n`;
-            docContent += `   Recipe URL: https://spoonacular.com/recipes/-${meal.id}\n`;
-          }
-          docContent += `\n`;
-        });
-        
-        docContent += `\n`;
-      });
-    }
-
-    // Add nutrients summary if available
-    if (mealPlanData.nutrients) {
-      docContent += `\n${'='.repeat(50)}\n`;
-      docContent += `NUTRITION SUMMARY\n`;
-      docContent += `${'-'.repeat(30)}\n\n`;
-      docContent += `Calories: ${mealPlanData.nutrients.calories || 'N/A'}\n`;
-      docContent += `Protein: ${mealPlanData.nutrients.protein || 'N/A'}g\n`;
-      docContent += `Fat: ${mealPlanData.nutrients.fat || 'N/A'}g\n`;
-      docContent += `Carbohydrates: ${mealPlanData.nutrients.carbohydrates || 'N/A'}g\n`;
-    }
-
-    // Add grocery list if available
-    if (mealPlanData.items && mealPlanData.items.length > 0) {
-      docContent += `\n${'='.repeat(50)}\n`;
-      docContent += `GROCERY LIST\n`;
-      docContent += `${'-'.repeat(30)}\n\n`;
+    Object.keys(mealsByDay).sort((a, b) => parseInt(a) - parseInt(b)).forEach(day => {
+      text += `DAY ${day}\n`;
+      text += '─'.repeat(40) + '\n';
       
-      mealPlanData.items.forEach(item => {
-        docContent += `☑ ${item.name}`;
-        if (item.aisle) {
-          docContent += ` (${item.aisle})`;
+      mealsByDay[day].forEach(meal => {
+        text += `\n${meal.mealType.toUpperCase()}: ${meal.title}\n`;
+        text += `  ⏱️  Ready in: ${meal.readyInMinutes || 'N/A'} minutes\n`;
+        text += `  🍽️  Servings: ${meal.servings || 'N/A'}\n`;
+        if (meal.sourceUrl) {
+          text += `  🔗 Recipe: ${meal.sourceUrl}\n`;
         }
-        docContent += `\n`;
       });
+      
+      text += '\n';
+    });
+
+    if (mealPlan.nutrients) {
+      text += '\n' + '═'.repeat(40) + '\n';
+      text += 'NUTRITION SUMMARY (Total for all meals)\n';
+      text += '─'.repeat(40) + '\n';
+      text += `Calories: ${Math.round(mealPlan.nutrients.calories)}\n`;
+      text += `Protein: ${Math.round(mealPlan.nutrients.protein)}g\n`;
+      text += `Fat: ${Math.round(mealPlan.nutrients.fat)}g\n`;
+      text += `Carbohydrates: ${Math.round(mealPlan.nutrients.carbohydrates)}g\n`;
     }
 
-    return docContent;
+    return text;
   }
 
   /**
-   * Create Google Doc with meal plan content
-   */
-  async createMealPlanDocument(content, eventDate, tokens) {
-    if (!tokens || !tokens.access_token) {
-      throw new Error('Google authentication required. Please sign in to Google Calendar.');
-    }
-
-    try {
-      const oauth2Client = new google.auth.OAuth2();
-      oauth2Client.setCredentials(tokens);
-
-      const docs = google.docs({ version: 'v1', auth: oauth2Client });
-
-      // Format date for filename
-      const dateStr = eventDate 
-        ? new Date(eventDate).toISOString().split('T')[0]
-        : new Date().toISOString().split('T')[0];
-      
-      const docTitle = `Meal Plan - ${dateStr}`;
-
-      // Create document
-      const doc = await docs.documents.create({
-        requestBody: {
-          title: docTitle
-        }
-      });
-
-      const documentId = doc.data.documentId;
-
-      // Insert content
-      const requests = [];
-      
-      if (doc.data.body && doc.data.body.content && doc.data.body.content.length > 0) {
-        const firstElement = doc.data.body.content[0];
-        if (firstElement.paragraph && firstElement.endIndex > firstElement.startIndex) {
-          requests.push({
-            deleteContentRange: {
-              range: {
-                startIndex: firstElement.startIndex,
-                endIndex: firstElement.endIndex - 1
-              }
-            }
-          });
-        }
-      }
-
-      if (content) {
-        requests.push({
-          insertText: {
-            location: {
-              index: 1
-            },
-            text: content
-          }
-        });
-      }
-
-      if (requests.length > 0) {
-        await docs.documents.batchUpdate({
-          documentId: documentId,
-          requestBody: {
-            requests: requests
-          }
-        });
-      }
-
-      const docUrl = `https://docs.google.com/document/d/${documentId}`;
-
-      return {
-        documentId: documentId,
-        url: docUrl,
-        title: docTitle
-      };
-    } catch (error) {
-      console.error('Error creating Google Doc:', error);
-      throw new Error(`Failed to create Google Doc: ${error.message}`);
-    }
-  }
-
-  /**
-   * Main method: Generate meal plan using MCP tool pattern and create Google Doc
+   * Main method: Generate meal plan for an event
    * This is called by the event analyzer when a meal prep event is detected
    */
   async generateMealPlanForEvent(event, tokens, preferences = {}) {
     try {
-      // Use user preferences, falling back to defaults only if not provided
-      // Default values are defined in generateMealPlan function signature
       const userPreferences = {
         days: preferences.days !== undefined ? preferences.days : 7,
-        familySize: preferences.familySize || null,
+        familySize: preferences.familySize || preferences.people || 2, // Default to 2 people
         targetCalories: preferences.targetCalories !== undefined ? preferences.targetCalories : 2000,
         diet: preferences.diet || '',
         exclude: preferences.exclude || '',
         eventDate: event.date || event.start?.dateTime || event.start?.date || new Date().toISOString()
       };
 
-      console.log(`🍽️  Generating meal plan for event: "${event.title}"`);
-      console.log(`   User preferences: ${JSON.stringify(userPreferences)}`);
+      console.log(`🍽️ [MCP] Generating meal plan for event: "${event.title}"`);
+      console.log(`   Preferences (with defaults):`, JSON.stringify(userPreferences));
 
-      // Generate meal plan using Spoonacular API with user preferences
-      // The generateMealPlan function has default values, but we pass user preferences explicitly
-      const mealPlan = await this.generateMealPlan({
-        days: userPreferences.days,
-        targetCalories: userPreferences.targetCalories,
-        diet: userPreferences.diet,
-        exclude: userPreferences.exclude
+      // Calculate number of recipes needed (3 meals per day)
+      const numberOfRecipes = userPreferences.days * 3;
+
+      // Build search tags based on preferences
+      let tags = [];
+      if (userPreferences.diet) {
+        tags.push(userPreferences.diet);
+      }
+
+      // Get random recipes with filters
+      console.log(`🔍 [MCP] Fetching ${numberOfRecipes} recipes...`);
+      const recipesResponse = await this.getRandomRecipes({
+        number: numberOfRecipes,
+        tags: tags.join(',')
       });
 
-      // Format for document
-      const docContent = this.formatMealPlanForDoc(mealPlan, userPreferences);
+      console.log(`🔍 [MCP] Raw response type:`, typeof recipesResponse);
+      console.log(`🔍 [MCP] Response preview:`, JSON.stringify(recipesResponse).substring(0, 200));
 
-      // Create Google Doc
-      const doc = await this.createMealPlanDocument(
-        docContent,
-        userPreferences.eventDate,
-        tokens
+      // Check if response is an error
+      if (recipesResponse && typeof recipesResponse === 'string') {
+        throw new Error(`Spoonacular returned error: ${recipesResponse.substring(0, 100)}`);
+      }
+
+      if (!recipesResponse || !recipesResponse.recipes || recipesResponse.recipes.length === 0) {
+        throw new Error('No recipes found matching your criteria');
+      }
+
+      const recipes = recipesResponse.recipes;
+      console.log(`✅ [MCP] Found ${recipes.length} recipes`);
+
+      // Get detailed information for each recipe (including nutrition)
+      console.log(`📊 [MCP] Fetching detailed recipe information...`);
+      const detailedRecipes = await Promise.all(
+        recipes.slice(0, numberOfRecipes).map(recipe => 
+          this.getRecipeInformation(recipe.id, true).catch(err => {
+            console.warn(`⚠️  Failed to get details for recipe ${recipe.id}:`, err.message);
+            return recipe; // Use basic recipe if detailed fetch fails
+          })
+        )
       );
 
-      console.log(`✅ Meal plan document created: ${doc.url}`);
+      // Build meal plan structure
+      const mealPlan = this.buildMealPlan(detailedRecipes, userPreferences);
+
+      // Format as text
+      const formattedText = this.formatMealPlanText(mealPlan, userPreferences);
+
+      console.log(`✅ [MCP] Meal plan generated successfully`);
 
       return {
         success: true,
         mealPlan: mealPlan,
-        document: doc,
-        preferences: userPreferences
+        preferences: userPreferences,
+        formattedText: formattedText
       };
     } catch (error) {
-      console.error('Error in generateMealPlanForEvent:', error);
+      console.error('❌ [MCP] Error in generateMealPlanForEvent:', error.message);
       throw error;
     }
   }
 }
 
 module.exports = new MCPMealPlanningClient();
-

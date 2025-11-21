@@ -5,6 +5,141 @@ const calendarConflictService = require('../services/calendarConflictService');
 const eventsStore = require('../services/eventsStore');
 const wishlistStore = require('../services/wishlistStore');
 const { getTranscriptionService } = require('../services/voice/transcriptionService');
+const conversationSummarizer = require('../services/voice/conversationSummarizer');
+
+function generateConversationId() {
+  return `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function ensureConversationStore(req) {
+  if (!req.session) {
+    return null;
+  }
+  if (!req.session.voiceConversations) {
+    req.session.voiceConversations = {};
+  }
+  return req.session.voiceConversations;
+}
+
+function getConversation(req, conversationId) {
+  if (!conversationId) {
+    return null;
+  }
+  const store = ensureConversationStore(req);
+  return store ? store[conversationId] || null : null;
+}
+
+function saveConversation(req, conversationId, conversation) {
+  if (!conversationId) {
+    return;
+  }
+  const store = ensureConversationStore(req);
+  if (store) {
+    store[conversationId] = {
+      ...(store[conversationId] || {}),
+      ...conversation,
+      updatedAt: Date.now()
+    };
+  }
+}
+
+function clearConversation(req, conversationId) {
+  if (!conversationId) {
+    return;
+  }
+  const store = ensureConversationStore(req);
+  if (store && store[conversationId]) {
+    delete store[conversationId];
+  }
+}
+
+/**
+ * Extract the most recently mentioned event from conversation history
+ * Useful for understanding references like "change that to 3pm" or "cancel that"
+ */
+function getLastMentionedEvent(conversationHistory) {
+  if (!conversationHistory || conversationHistory.length === 0) {
+    return null;
+  }
+  
+  // Search backwards through history for event details
+  for (let i = conversationHistory.length - 1; i >= 0; i--) {
+    const message = conversationHistory[i];
+    
+    // Look for assistant messages that might contain event confirmation
+    if (message.role === 'assistant' && message.content) {
+      // Try to extract event details from the message
+      // This is a simple heuristic - the LLM should handle most context resolution
+      const content = message.content.toLowerCase();
+      
+      // Check if this message is about an event
+      if (content.includes('scheduled') || content.includes('created') || 
+          content.includes('meeting') || content.includes('appointment') ||
+          content.includes('event')) {
+        
+        // Try to extract basic info (title, date, time) from the message
+        // This is a fallback - ideally the LLM uses full conversation context
+        return {
+          messageContent: message.content,
+          timestamp: message.timestamp || Date.now()
+        };
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Get conversation context summary for debugging
+ */
+function getConversationSummary(conversation) {
+  if (!conversation) {
+    return 'No active conversation';
+  }
+  
+  const historyLength = conversation.conversationHistory ? conversation.conversationHistory.length / 2 : 0;
+  const status = conversation.status || 'unknown';
+  const hasEventDetails = conversation.eventDetails && Object.keys(conversation.eventDetails).length > 0;
+  
+  return {
+    id: conversation.id,
+    status: status,
+    exchangeCount: Math.floor(historyLength),
+    hasEventDetails: hasEventDetails,
+    eventTitle: conversation.eventDetails?.title || null,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt
+  };
+}
+
+function mergeEventDetails(base = {}, updates = {}) {
+  const merged = { ...base };
+  const fields = ['title', 'date', 'time', 'duration', 'location', 'description'];
+
+  fields.forEach(field => {
+    const value = updates[field];
+    if (value !== undefined && value !== null && value !== '') {
+      merged[field] = value;
+    }
+  });
+
+  if (merged.duration === undefined) {
+    merged.duration = 60;
+  }
+
+  return merged;
+}
+
+function hasMeaningfulEventDetails(details = {}) {
+  if (!details) {
+    return false;
+  }
+  return ['title', 'date', 'time', 'location', 'description'].some(field => {
+    const value = details[field];
+    return value !== undefined && value !== null && value !== '';
+  });
+}
 
 // Initialize voice adapter
 let voiceAdapter;
@@ -31,16 +166,112 @@ router.post('/process', async (req, res) => {
     }
 
     // Extract conversation state from context
-    const conversationHistory = context.conversationHistory || [];
+    let conversationHistory = context.conversationHistory || [];
     const followUpCount = context.followUpCount || 0;
+    let conversationId = context.conversationId || null;
+    let conversation = conversationId ? getConversation(req, conversationId) : null;
+    
+    // Get conversation history from stored conversation if available
+    if (conversation && conversation.conversationHistory) {
+      conversationHistory = conversation.conversationHistory;
+    }
 
     // Parse intent and extract event details with conversation context
     const intentResult = await voiceAdapter.parseIntent(transcript, {
       currentDate: new Date().toISOString().split('T')[0],
       conversationHistory: conversationHistory,
       followUpCount: followUpCount,
+      summary: conversation?.summary || null,
       ...context
     });
+
+    const managesEventConversation = ['add_event', 'needs_clarification'].includes(intentResult.intent);
+    const containsEventDetails = hasMeaningfulEventDetails(intentResult.eventDetails);
+
+    if (managesEventConversation && containsEventDetails) {
+      if (!conversation) {
+        conversationId = generateConversationId();
+        conversation = {
+          id: conversationId,
+          createdAt: Date.now(),
+          status: 'collecting',
+          eventDetails: {},
+          alternatives: []
+        };
+      }
+
+      const mergedDetails = mergeEventDetails(conversation.eventDetails, intentResult.eventDetails || {});
+      conversation.eventDetails = mergedDetails;
+      conversation.lastIntent = intentResult.intent;
+      conversation.followUpCount = followUpCount;
+      conversation.status = intentResult.intent === 'add_event' && intentResult.readyToProcess !== false
+        ? 'ready'
+        : conversation.status || 'collecting';
+
+      saveConversation(req, conversationId, conversation);
+      intentResult.eventDetails = mergedDetails;
+    } else if (conversation) {
+      // Merge any partial updates even if adapter didn't provide full details
+      const mergedDetails = mergeEventDetails(conversation.eventDetails, intentResult.eventDetails || {});
+      conversation.eventDetails = mergedDetails;
+      saveConversation(req, conversationId, conversation);
+      intentResult.eventDetails = mergedDetails;
+    }
+
+    if (intentResult.abort && conversationId) {
+      clearConversation(req, conversationId);
+      conversationId = null;
+    }
+
+    // Update conversation history with this exchange
+    const aiResponse = intentResult.followUpQuestion || intentResult.response || 'Understood';
+    const newHistory = [
+      ...conversationHistory,
+      { role: 'user', content: transcript },
+      { role: 'assistant', content: aiResponse }
+    ];
+    
+    // Save updated history to conversation with summarization
+    if (conversation) {
+      const lastSummarizedAt = conversation.lastSummarizedAt || 0;
+      
+      // Check if we should summarize
+      if (conversationSummarizer.shouldSummarize(newHistory.length, lastSummarizedAt)) {
+        console.log('📝 [Voice] Triggering summarization at', newHistory.length, 'messages');
+        
+        try {
+          // Get messages to summarize and keep
+          const { toSummarize, toKeep } = conversationSummarizer.getMessagesToSummarize(
+            newHistory,
+            lastSummarizedAt
+          );
+          
+          // Generate summary
+          const existingSummary = conversation.summary || null;
+          const newSummary = await conversationSummarizer.summarizeConversation(
+            toSummarize,
+            existingSummary
+          );
+          
+          // Update conversation with summary and recent history
+          conversation.summary = newSummary;
+          conversation.conversationHistory = toKeep;
+          conversation.lastSummarizedAt = newHistory.length;
+          
+          console.log('✅ [Voice] Summarized', toSummarize.length, 'messages, keeping', toKeep.length);
+        } catch (error) {
+          console.error('❌ [Voice] Summarization failed:', error.message);
+          // Fallback: keep last 8 messages without summary
+          conversation.conversationHistory = newHistory.slice(-8);
+        }
+      } else {
+        // No summarization needed yet, keep all history
+        conversation.conversationHistory = newHistory;
+      }
+      
+      conversation.followUpCount = followUpCount;
+      saveConversation(req, conversationId, conversation);
+    }
 
     res.json({
       success: true,
@@ -55,7 +286,9 @@ router.post('/process', async (req, res) => {
       readyToProcess: intentResult.readyToProcess !== false,
       abort: intentResult.abort || false,
       abortMessage: intentResult.abortMessage || null,
-      conversationHistory: intentResult.conversationHistory || conversationHistory
+      conversationHistory: conversation?.conversationHistory || [],
+      conversationId: conversationId,
+      historyLength: Math.floor((conversation?.conversationHistory?.length || 0) / 2)
     });
   } catch (error) {
     console.error('Error processing voice input:', error);
@@ -127,6 +360,12 @@ router.post('/transcribe', async (req, res) => {
 function normalizeEventsForConflictCheck(events) {
   return events.map(event => {
     let dateStr, timeStr, duration;
+    
+    // Skip all-day events - they don't have specific times and shouldn't participate in conflict checking
+    if (event.allDay || (!event.date?.includes('T') && !event.time)) {
+      // Silently skip all-day events - they're not time conflicts
+      return null;
+    }
     
     // Handle Google Calendar events (date is ISO string like "2024-01-15T14:30:00Z")
     if (event.date && (typeof event.date === 'string' && event.date.includes('T'))) {
@@ -204,9 +443,17 @@ function normalizeEventsForConflictCheck(events) {
 
 router.post('/check-conflict', async (req, res) => {
   try {
-    const { eventDetails, existingEvents, tokens } = req.body;
+    const { eventDetails, existingEvents, tokens, conversationId } = req.body;
+    const conversation = conversationId ? getConversation(req, conversationId) : null;
+    const normalizedEventDetails = mergeEventDetails(conversation?.eventDetails || {}, eventDetails || {});
 
-    if (!eventDetails || !eventDetails.date || !eventDetails.time) {
+    if (conversation) {
+      conversation.eventDetails = normalizedEventDetails;
+      conversation.status = 'checking_conflict';
+      saveConversation(req, conversationId, conversation);
+    }
+
+    if (!normalizedEventDetails || !normalizedEventDetails.date || !normalizedEventDetails.time) {
       return res.status(400).json({
         success: false,
         error: 'Event details with date and time are required'
@@ -269,9 +516,9 @@ router.post('/check-conflict', async (req, res) => {
     // Check for conflicts
     const conflictResult = calendarConflictService.checkConflict(
       {
-        date: eventDetails.date,
-        time: eventDetails.time,
-        duration: eventDetails.duration || 60
+        date: normalizedEventDetails.date,
+        time: normalizedEventDetails.time,
+        duration: normalizedEventDetails.duration || 60
       },
       events
     );
@@ -281,11 +528,11 @@ router.post('/check-conflict', async (req, res) => {
 
     if (conflictResult.hasConflict) {
       // Find alternative slots
-      const requestedDate = new Date(eventDetails.date + 'T00:00:00');
+      const requestedDate = new Date(normalizedEventDetails.date + 'T00:00:00');
       alternatives = calendarConflictService.getAlternativeSuggestions(
         {
-          date: eventDetails.date,
-          duration: eventDetails.duration || 60
+          date: normalizedEventDetails.date,
+          duration: normalizedEventDetails.duration || 60
         },
         events,
         3
@@ -295,11 +542,18 @@ router.post('/check-conflict', async (req, res) => {
       conflictResponse = await voiceAdapter.generateConflictResponse(
         {
           conflictingEvent: conflictResult.conflictingEvent,
-          requestedTime: eventDetails.time,
-          requestedDate: eventDetails.date
+          requestedTime: normalizedEventDetails.time,
+          requestedDate: normalizedEventDetails.date
         },
         alternatives
       );
+    }
+
+    if (conversation) {
+      conversation.status = conflictResult.hasConflict ? 'awaiting_user_choice' : 'ready';
+      conversation.alternatives = alternatives;
+      conversation.lastConflict = conflictResult;
+      saveConversation(req, conversationId, conversation);
     }
 
     res.json({
@@ -314,7 +568,8 @@ router.post('/check-conflict', async (req, res) => {
         type: 'success',
         message: 'No conflicts found'
       }),
-      allowOverride: true // Always allow double booking
+      allowOverride: true, // Always allow double booking
+      conversationId: conversationId
     });
   } catch (error) {
     console.error('Error checking conflict:', error);
@@ -330,7 +585,16 @@ router.post('/check-conflict', async (req, res) => {
  */
 router.post('/create-event', async (req, res) => {
   try {
-    const { eventDetails, override = false } = req.body;
+    const { eventDetails: incomingEventDetails, override = false, conversationId } = req.body;
+    const conversation = conversationId ? getConversation(req, conversationId) : null;
+    let eventDetails = mergeEventDetails(conversation?.eventDetails || {}, incomingEventDetails || {});
+
+    if (conversation) {
+      conversation.eventDetails = eventDetails;
+      conversation.status = 'creating';
+      saveConversation(req, conversationId, conversation);
+    }
+
     // Use tokens from session instead of request body for security
     const tokens = req.session?.tokens || req.body.tokens;
 
@@ -390,8 +654,15 @@ router.post('/create-event', async (req, res) => {
           error: 'Invalid date format. Expected YYYY-MM-DD format.'
         });
       }
-      normalizedDate = dateObj.toISOString().split('T')[0];
+      // Use local timezone to avoid date shifting
+      const year = dateObj.getFullYear();
+      const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+      const day = String(dateObj.getDate()).padStart(2, '0');
+      normalizedDate = `${year}-${month}-${day}`;
     }
+    
+    eventDetails.time = eventTime;
+    eventDetails.date = normalizedDate;
     
     // Create datetime string (local time)
     const startDateTime = `${normalizedDate}T${eventTime}:00`;
@@ -529,6 +800,10 @@ router.post('/create-event', async (req, res) => {
       location: eventDetails.location
     });
 
+    // Don't clear conversation after event creation - let it persist for follow-ups
+    // User can explicitly end session when done with voice mode
+    console.log('✅ [Voice] Event created, keeping conversation active for follow-ups');
+
     res.json({
       success: true,
       event: event,
@@ -536,7 +811,8 @@ router.post('/create-event', async (req, res) => {
       message: override ? 
         'Event created despite conflict. You chose to double book.' : 
         `Event created successfully${eventCreatedInGoogle ? ' in Google Calendar' : ' in local calendar'}`,
-      createdInGoogle: eventCreatedInGoogle
+      createdInGoogle: eventCreatedInGoogle,
+      conversationCleared: !!conversationId
     });
   } catch (error) {
     console.error('❌ Error in create-event endpoint:', error);
@@ -756,6 +1032,56 @@ router.post('/add-to-wishlist', async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to add to wishlist'
+    });
+  }
+});
+
+router.post('/conversation/clear', (req, res) => {
+  try {
+    const { conversationId } = req.body;
+
+    if (!conversationId) {
+      return res.status(400).json({
+        success: false,
+        error: 'conversationId is required'
+      });
+    }
+
+    clearConversation(req, conversationId);
+
+    res.json({
+      success: true
+    });
+  } catch (error) {
+    console.error('Error clearing conversation context:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to clear conversation'
+    });
+  }
+});
+
+/**
+ * End voice session - clear conversation when user exits voice mode
+ */
+router.post('/end-session', (req, res) => {
+  try {
+    const { conversationId } = req.body;
+
+    if (conversationId) {
+      console.log('🔚 [Voice] Ending session, clearing conversation:', conversationId);
+      clearConversation(req, conversationId);
+    }
+
+    res.json({
+      success: true,
+      message: 'Voice session ended'
+    });
+  } catch (error) {
+    console.error('Error ending voice session:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to end session'
     });
   }
 });

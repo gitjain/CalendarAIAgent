@@ -347,6 +347,151 @@
   background: #faf5ff;
 }
 
+.item-suggestions {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.suggestions-toggle-btn {
+  align-self: flex-start;
+  background: #e0e7ff;
+  border: 1px solid #c7d2fe;
+  color: #312e81;
+  padding: 0.35rem 0.8rem;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.suggestions-toggle-btn:hover:not(:disabled) {
+  background: #c7d2fe;
+}
+
+.suggestions-toggle-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.suggestions-panel {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 0.9rem;
+  background: #f9fafb;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.suggestions-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.suggestions-refresh-btn {
+  background: none;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.suggestions-refresh-btn:hover:not(:disabled) {
+  background: #e5e7eb;
+}
+
+.suggestions-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.suggestions-loading,
+.suggestions-error,
+.suggestions-info {
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.suggestions-error {
+  color: #b91c1c;
+}
+
+.suggestions-info {
+  color: #1f2937;
+}
+
+.suggestions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.suggestion-card {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 0.75rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.suggestion-info {
+  flex: 1;
+  font-size: 0.85rem;
+  color: #1f2937;
+}
+
+.suggestion-time {
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.suggestion-duration {
+  font-size: 0.75rem;
+  color: #6b7280;
+  margin-bottom: 0.35rem;
+}
+
+.suggestion-message {
+  margin: 0 0 0.35rem 0;
+  color: #2563eb;
+}
+
+.suggestion-reasoning {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.suggestion-schedule-btn {
+  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  color: white;
+  border: none;
+  padding: 0.5rem 0.9rem;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+
+.suggestion-schedule-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.suggestion-schedule-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .edit-item-form {
   width: 100%;
   display: flex;

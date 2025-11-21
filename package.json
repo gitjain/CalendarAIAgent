@@ -10,7 +10,8 @@
     "build": "cd client && npm run build",
     "install-client": "cd client && npm install",
     "install-server": "npm install",
-    "install-all": "npm install && npm run install-client"
+    "install-all": "npm install && npm run install-client",
+    "mcp:meal-planning": "MCP_RUN_MODE=server python3 mcp-servers/meal-planning/meal_planning_server.py"
   },
   "dependencies": {
     "axios": "^1.6.0",

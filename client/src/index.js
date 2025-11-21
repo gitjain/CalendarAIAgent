@@ -6,7 +6,10 @@ import axios from 'axios';
 
 // Configure axios to send credentials (cookies) with all requests
 axios.defaults.withCredentials = true;
-axios.defaults.baseURL = process.env.REACT_APP_SERVER_URL || 'http://localhost:5001';
+// Only set baseURL if explicitly provided (for production), otherwise use proxy
+if (process.env.REACT_APP_SERVER_URL) {
+  axios.defaults.baseURL = process.env.REACT_APP_SERVER_URL;
+}
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
